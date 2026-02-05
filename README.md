@@ -1,5 +1,6 @@
 # ==============================================================================
 # Script: audit_tkgs_resources.sh
+# Author: Mamadou Bah
 # Description: Iterates through all TKGs clusters in a Supervisor environment.
 #              1. Logs into Supervisor using AO credentials.
 #              2. Iterates through EVERY Namespace to find Workload Clusters.
