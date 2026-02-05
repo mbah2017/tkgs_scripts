@@ -102,7 +102,8 @@ log "INFO" "Attempting Supervisor Login..."
 
 # Login to Supervisor using AO credentials
 export KUBECTL_VSPHERE_PASSWORD="$AO_PASSWORD"
-if ! kubectl vsphere login --server "$SUPERVISOR_ENDPOINT" --vsphere-username "$AO_USER" --insecure-skip-tls-verify > /dev/null 2>&1; then
+# UPDATED: Removed output suppression to fix hanging issues caused by hidden prompts
+if ! kubectl vsphere login --server "$SUPERVISOR_ENDPOINT" --vsphere-username "$AO_USER" --insecure-skip-tls-verify; then
     log "ERROR" "Failed to login to Supervisor Cluster. Check credentials."
     exit 1
 fi
