@@ -155,6 +155,7 @@ audit_cluster() {
     # Define output file for this specific cluster thread
     local CLUSTER_OUTPUT="${TEMP_DIR}/${CLUSTER_NAME}_${SUPERVISOR_NS}.csv"
     local PODS_JSON="${TEMP_DIR}/${CLUSTER_NAME}_${SUPERVISOR_NS}_pods.json"
+    local CMD_LOG="${TEMP_DIR}/${CLUSTER_NAME}_${SUPERVISOR_NS}.cmd.log"
 
     # Authenticate to the specific Workload Cluster
     local_log "DEBUG" "Attempting login..."
@@ -180,22 +181,31 @@ audit_cluster() {
     
     local_log "DEBUG" "Login successful."
 
-    # Query Pods - Capture to file first to avoid JQ pipes breaking on non-JSON error text
+    # Query Pods
     local_log "DEBUG" "Querying pods and calculating resources..."
     
-    # Capture stderr and stdout to the file to catch everything
-    kubectl get pods -A -o json --kubeconfig "$KUBECONFIG" > "$PODS_JSON" 2>&1
+    # CRITICAL FIX: Separate StdOut (JSON) and StdErr (Logs/Errors) to avoid corrupting the JSON file
+    kubectl get pods -A -o json --kubeconfig "$KUBECONFIG" > "$PODS_JSON" 2> "$CMD_LOG"
     
-    # Check if the file is valid JSON using jq exit code
+    # Check if file exists and has size > 0
+    if [ ! -s "$PODS_JSON" ]; then
+        # Check stderr log to see what happened
+        local ERR_MSG=$(cat "$CMD_LOG" | head -n 1)
+        local_log "ERROR" "Failed to retrieve pods. JSON output is empty. Error log start: '$ERR_MSG'"
+        rm -f "$KUBECONFIG" "$PODS_JSON" "$CMD_LOG"
+        return
+    fi
+
+    # Check if the file is valid JSON
     if ! jq -e . "$PODS_JSON" > /dev/null 2>&1; then
-        # Capture the first line to see what the error/text is
         local HEAD_CONTENT=$(head -n 1 "$PODS_JSON")
-        local_log "ERROR" "Failed to retrieve valid JSON for pods. Server might have returned a plain text error. Content start: '$HEAD_CONTENT'"
-        rm -f "$KUBECONFIG" "$PODS_JSON"
+        local_log "ERROR" "Output is not valid JSON. Content start: '$HEAD_CONTENT'"
+        rm -f "$KUBECONFIG" "$PODS_JSON" "$CMD_LOG"
         return
     fi
 
     # Process valid JSON
+    # We capture stderr of jq to CMD_LOG in case of runtime errors (like 'Invalid numeric literal')
     jq -r --arg c_name "$CLUSTER_NAME" \
         --argjson cpu_limit "$CPU_THRESHOLD_M" \
         --argjson mem_limit "$MEM_THRESHOLD_MI" '
@@ -217,7 +227,15 @@ audit_cluster() {
         ) as $mem_mi |
         select($cpu_m > $cpu_limit or $mem_mi > $mem_limit) |
         "\($c_name),\(.namespace),\(.podName),\(.containers.name),\($cpu_m),\($mem_mi)"
-    ' "$PODS_JSON" > "$CLUSTER_OUTPUT"
+    ' "$PODS_JSON" > "$CLUSTER_OUTPUT" 2>> "$CMD_LOG"
+    
+    # Check if JQ failed
+    if [ $? -ne 0 ]; then
+        local JQ_ERR=$(cat "$CMD_LOG")
+        local_log "ERROR" "JQ Processing Failed. Details: $JQ_ERR"
+        rm -f "$KUBECONFIG" "$PODS_JSON" "$CMD_LOG"
+        return
+    fi
     
     # Result Handling
     if [ -s "$CLUSTER_OUTPUT" ]; then
@@ -229,8 +247,8 @@ audit_cluster() {
         local_log "DEBUG" "Audit complete. No high usage pods found."
     fi
 
-    # Cleanup unique kubeconfig and temp json
-    rm -f "$KUBECONFIG" "$PODS_JSON"
+    # Cleanup unique kubeconfig and temp files
+    rm -f "$KUBECONFIG" "$PODS_JSON" "$CMD_LOG"
 }
 
 # ==============================================================================
@@ -246,7 +264,7 @@ TOTAL_CLUSTERS_FOUND=0
 
 for NS in $NAMESPACES; do
     # Check for clusters in this namespace
-    # Capture to file to validate JSON
+    # Capture to file to validate JSON and separate stderr
     CLUSTERS_JSON="${WORK_DIR}/clusters_${NS}.json"
     kubectl get clusters -n "$NS" -o json > "$CLUSTERS_JSON" 2>/dev/null
     
