@@ -198,8 +198,8 @@ audit_cluster() {
 
     # Check if the file is valid JSON
     if ! jq -e . "$PODS_JSON" > /dev/null 2>&1; then
-        local HEAD_CONTENT=$(head -n 1 "$PODS_JSON")
-        local_log "ERROR" "Output is not valid JSON. Content start: '$HEAD_CONTENT'"
+        local HEAD_CONTENT=$(head -n 5 "$PODS_JSON")
+        local_log "ERROR" "Output is not valid JSON. CONTENT DUMP: $HEAD_CONTENT"
         rm -f "$KUBECONFIG" "$PODS_JSON" "$CMD_LOG"
         return
     fi
@@ -216,14 +216,22 @@ audit_cluster() {
             containers: .spec.containers[]
         } |
         (.containers.resources.requests.cpu // "0") as $raw_cpu |
-        (if ($raw_cpu | contains("m")) then ($raw_cpu | sub("m";"") | tonumber) else (($raw_cpu | tonumber) * 1000) end) as $cpu_m |
+        (
+          # Use try/catch to prevent crashes on bad data
+          try (
+            if ($raw_cpu | contains("m")) then ($raw_cpu | sub("m";"") | tonumber) 
+            else (($raw_cpu | tonumber) * 1000) end
+          ) catch 0
+        ) as $cpu_m |
         (.containers.resources.requests.memory // "0") as $raw_mem |
         (
+          try (
             if ($raw_mem | contains("Gi")) then ($raw_mem | sub("Gi";"") | tonumber * 1024)
             elif ($raw_mem | contains("Mi")) then ($raw_mem | sub("Mi";"") | tonumber)
             elif ($raw_mem | contains("Ki")) then ($raw_mem | sub("Ki";"") | tonumber / 1024)
             else ($raw_mem | tonumber / 1048576)
             end
+          ) catch 0
         ) as $mem_mi |
         select($cpu_m > $cpu_limit or $mem_mi > $mem_limit) |
         "\($c_name),\(.namespace),\(.podName),\(.containers.name),\($cpu_m),\($mem_mi)"
@@ -232,7 +240,9 @@ audit_cluster() {
     # Check if JQ failed
     if [ $? -ne 0 ]; then
         local JQ_ERR=$(cat "$CMD_LOG")
+        local BAD_FILE_HEAD=$(head -n 5 "$PODS_JSON")
         local_log "ERROR" "JQ Processing Failed. Details: $JQ_ERR"
+        local_log "ERROR" "File content glimpse: $BAD_FILE_HEAD"
         rm -f "$KUBECONFIG" "$PODS_JSON" "$CMD_LOG"
         return
     fi
